@@ -9,6 +9,16 @@ use tracing::{debug, info, warn};
 
 use crate::registry::DevboxRegistry;
 
+/// Result of backend resolution
+enum BackendResult {
+    /// Backend resolved successfully with Pod IP
+    Ok(String, u16),
+    /// Devbox not registered (uniqueID not found)
+    NotFound,
+    /// Devbox registered but Pod is not running (no Pod IP)
+    NotRunning,
+}
+
 /// Regex to parse host header: <uniqueID>-<port>.devbox.xxx
 ///
 /// Pattern: ^(<uniqueID>)-(<port>)\.
@@ -27,28 +37,23 @@ static HOST_REGEX: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
 
 /// Context passed between proxy request phases
 pub struct ProxyCtx {
-    /// Backend hostname (e.g., "outdoor-before-78648.ns-admin.svc.cluster.local")
-    pub backend_host: String,
+    /// Backend Pod IP address
+    pub backend_ip: String,
     /// Backend port
     pub backend_port: u16,
 }
 
-/// Pingora-based HTTP proxy for routing requests to devbox services.
+/// Pingora-based HTTP proxy for routing requests to devbox pods.
 ///
 /// Routes requests based on the Host header pattern:
-/// `<uniqueID>-<port>.devbox.xxx` -> `<uniqueID>.<namespace>.svc.cluster.local:<port>`
+/// `<uniqueID>-<port>.devbox.xxx` -> `<pod_ip>:<port>`
 pub struct DevboxProxy {
     registry: Arc<DevboxRegistry>,
-    #[allow(dead_code)]
-    domain_suffix: String,
 }
 
 impl DevboxProxy {
-    pub const fn new(registry: Arc<DevboxRegistry>, domain_suffix: String) -> Self {
-        Self {
-            registry,
-            domain_suffix,
-        }
+    pub const fn new(registry: Arc<DevboxRegistry>) -> Self {
+        Self { registry }
     }
 
     /// Parse the Host header to extract uniqueID and port.
@@ -68,22 +73,35 @@ impl DevboxProxy {
 
     /// Resolve the backend address from uniqueID.
     ///
-    /// Returns the backend hostname and port if the uniqueID is registered.
-    fn resolve_backend(&self, unique_id: &str, port: u16) -> Option<(String, u16)> {
-        let info = self.registry.get(unique_id)?;
+    /// Performs a two-step lookup:
+    /// 1. uniqueID -> DevboxInfo (namespace, devbox_name)
+    /// 2. namespace/devbox_name -> pod_ip
+    ///
+    /// Returns:
+    /// - `BackendResult::Ok` if uniqueID is registered and Pod IP is available
+    /// - `BackendResult::NotFound` if uniqueID is not registered
+    /// - `BackendResult::NotRunning` if uniqueID is registered but Pod IP is not available
+    fn resolve_backend(&self, unique_id: &str, port: u16) -> BackendResult {
+        // Step 1: Look up devbox info
+        let Some(info) = self.registry.get_devbox(unique_id) else {
+            return BackendResult::NotFound;
+        };
 
-        // Format: <uniqueID>.<namespace>.svc.cluster.local
-        let backend_host = format!("{}.{}.svc.cluster.local", unique_id, info.namespace);
+        // Step 2: Look up pod IP
+        let Some(pod_ip) = self.registry.get_pod_ip(&info.namespace, &info.devbox_name) else {
+            return BackendResult::NotRunning;
+        };
 
         debug!(
             unique_id = %unique_id,
             namespace = %info.namespace,
-            backend = %backend_host,
+            devbox_name = %info.devbox_name,
+            pod_ip = %pod_ip,
             port = port,
             "Resolved backend"
         );
 
-        Some((backend_host, port))
+        BackendResult::Ok(pod_ip, port)
     }
 
     /// Send a 404 Not Found response
@@ -95,10 +113,9 @@ impl DevboxProxy {
         Ok(true)
     }
 
-    /// Send a 502 Bad Gateway response
-    #[allow(dead_code)]
-    async fn send_bad_gateway(session: &mut Session) -> Result<bool> {
-        let header = ResponseHeader::build(502, None)?;
+    /// Send a 503 Service Unavailable response (devbox not running)
+    async fn send_service_unavailable(session: &mut Session) -> Result<bool> {
+        let header = ResponseHeader::build(503, None)?;
         session
             .write_response_header(Box::new(header), true)
             .await?;
@@ -130,23 +147,34 @@ impl ProxyHttp for DevboxProxy {
         };
 
         // Resolve backend from registry
-        let Some((backend_host, backend_port)) = self.resolve_backend(&unique_id, port) else {
-            warn!(
-                host = %host,
-                unique_id = %unique_id,
-                "No backend found for uniqueID"
-            );
-            return Self::send_not_found(session).await;
+        let (backend_ip, backend_port) = match self.resolve_backend(&unique_id, port) {
+            BackendResult::Ok(ip, port) => (ip, port),
+            BackendResult::NotFound => {
+                warn!(
+                    host = %host,
+                    unique_id = %unique_id,
+                    "Devbox not found"
+                );
+                return Self::send_not_found(session).await;
+            }
+            BackendResult::NotRunning => {
+                warn!(
+                    host = %host,
+                    unique_id = %unique_id,
+                    "Devbox not running (no Pod IP)"
+                );
+                return Self::send_service_unavailable(session).await;
+            }
         };
 
         info!(
             host = %host,
-            backend = %format!("{}:{}", backend_host, backend_port),
+            backend = %format!("{}:{}", backend_ip, backend_port),
             "Routing request"
         );
 
         *ctx = Some(ProxyCtx {
-            backend_host,
+            backend_ip,
             backend_port,
         });
 
@@ -163,9 +191,9 @@ impl ProxyHttp for DevboxProxy {
             .expect("Context should be set in request_filter");
 
         let peer = HttpPeer::new(
-            (ctx.backend_host.as_str(), ctx.backend_port),
+            (ctx.backend_ip.as_str(), ctx.backend_port),
             false, // No TLS to backend (internal cluster traffic)
-            ctx.backend_host.clone(),
+            ctx.backend_ip.clone(),
         );
 
         Ok(Box::new(peer))
@@ -255,28 +283,46 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_backend() {
+    fn test_resolve_backend_with_pod_ip() {
         let registry = Arc::new(DevboxRegistry::new());
-        registry.register("outdoor-before-78648".to_string(), "ns-admin".to_string());
+        registry.register_devbox(
+            "outdoor-before-78648".to_string(),
+            "ns-admin".to_string(),
+            "devbox1".to_string(),
+        );
+        registry.update_pod_ip("ns-admin", "devbox1", "10.107.173.213".to_string());
 
-        let proxy = DevboxProxy::new(registry, "devbox.sealos.io".to_string());
+        let proxy = DevboxProxy::new(registry);
 
         let result = proxy.resolve_backend("outdoor-before-78648", 8080);
-        assert_eq!(
+        assert!(matches!(
             result,
-            Some((
-                "outdoor-before-78648.ns-admin.svc.cluster.local".to_string(),
-                8080
-            ))
+            BackendResult::Ok(ip, 8080) if ip == "10.107.173.213"
+        ));
+    }
+
+    #[test]
+    fn test_resolve_backend_no_pod_ip() {
+        let registry = Arc::new(DevboxRegistry::new());
+        registry.register_devbox(
+            "outdoor-before-78648".to_string(),
+            "ns-admin".to_string(),
+            "devbox1".to_string(),
         );
+        // Pod IP not set
+
+        let proxy = DevboxProxy::new(registry);
+
+        let result = proxy.resolve_backend("outdoor-before-78648", 8080);
+        assert!(matches!(result, BackendResult::NotRunning));
     }
 
     #[test]
     fn test_resolve_backend_not_found() {
         let registry = Arc::new(DevboxRegistry::new());
-        let proxy = DevboxProxy::new(registry, "devbox.sealos.io".to_string());
+        let proxy = DevboxProxy::new(registry);
 
         let result = proxy.resolve_backend("unknown-id-123", 8080);
-        assert!(result.is_none());
+        assert!(matches!(result, BackendResult::NotFound));
     }
 }
