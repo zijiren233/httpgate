@@ -13,6 +13,29 @@ fullnameOverride: ""
 # The gateway listens on this port on each node
 httpPort: 8080
 
+# Service configuration
+service:
+  # Enable trafficDistribution: PreferSameNode (requires K8s 1.34+)
+  # Routes traffic to pods on the same node when possible
+  # https://kubernetes.io/docs/concepts/services-networking/service/#traffic-distribution
+  preferSameNode: false
+
+# Ingress configuration
+ingress:
+  enabled: false
+  ingressClassName: nginx
+  annotations:
+    nginx.ingress.kubernetes.io/backend-protocol: "HTTP"
+  hosts:
+    - host: "*.devbox.example.com"
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+    # - hosts:
+    #     - "*.devbox.example.com"
+    #   secretName: devbox-tls
+
 # Additional environment variables
 # These will be added to the ConfigMap and injected into the pods
 env: {}
