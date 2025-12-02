@@ -10,9 +10,7 @@ metadata:
   annotations:
     nginx.ingress.kubernetes.io/ssl-redirect: "true"
     nginx.ingress.kubernetes.io/backend-protocol: "HTTP"
-    nginx.ingress.kubernetes.io/canary: "true"
-    nginx.ingress.kubernetes.io/canary-by-header: ":authority"
-    nginx.ingress.kubernetes.io/canary-by-header-pattern: "^devbox-.+-\\d+\\."
+    higress.io/prefix-match-header-host: devbox-
     {{- with .Values.ingress.annotations }}
     {{- toYaml . | nindent 4 }}
     {{- end }}
@@ -67,9 +65,7 @@ metadata:
   annotations:
     nginx.ingress.kubernetes.io/ssl-redirect: "true"
     nginx.ingress.kubernetes.io/backend-protocol: "GRPC"
-    nginx.ingress.kubernetes.io/canary: "true"
-    nginx.ingress.kubernetes.io/canary-by-header: ":authority"
-    nginx.ingress.kubernetes.io/canary-by-header-pattern: "^devboxgrpc-.+-\\d+\\."
+    higress.io/prefix-match-header-host: devboxgrpc-
     {{- with .Values.ingress.annotations }}
     {{- toYaml . | nindent 4 }}
     {{- end }}
