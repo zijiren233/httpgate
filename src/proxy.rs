@@ -19,6 +19,10 @@ enum BackendResult {
     NotRunning,
 }
 
+/// Error response bodies
+const BODY_NOT_FOUND: &[u8] = b"devbox not found";
+const BODY_NOT_RUNNING: &[u8] = b"devbox not running";
+
 /// Regex to parse host header: <uniqueID>-<port>.devbox.xxx
 ///
 /// Pattern: ^(<uniqueID>)-(<port>)\.
@@ -106,18 +110,28 @@ impl DevboxProxy {
 
     /// Send a 404 Not Found response
     async fn send_not_found(session: &mut Session) -> Result<bool> {
-        let header = ResponseHeader::build(404, None)?;
+        let mut header = ResponseHeader::build(404, None)?;
+        header.insert_header("Content-Length", BODY_NOT_FOUND.len().to_string())?;
+        header.insert_header("Content-Type", "text/plain")?;
         session
-            .write_response_header(Box::new(header), true)
+            .write_response_header(Box::new(header), false)
+            .await?;
+        session
+            .write_response_body(Some(BODY_NOT_FOUND.into()), true)
             .await?;
         Ok(true)
     }
 
     /// Send a 503 Service Unavailable response (devbox not running)
     async fn send_service_unavailable(session: &mut Session) -> Result<bool> {
-        let header = ResponseHeader::build(503, None)?;
+        let mut header = ResponseHeader::build(503, None)?;
+        header.insert_header("Content-Length", BODY_NOT_RUNNING.len().to_string())?;
+        header.insert_header("Content-Type", "text/plain")?;
         session
-            .write_response_header(Box::new(header), true)
+            .write_response_header(Box::new(header), false)
+            .await?;
+        session
+            .write_response_body(Some(BODY_NOT_RUNNING.into()), true)
             .await?;
         Ok(true)
     }
