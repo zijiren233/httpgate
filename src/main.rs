@@ -1,6 +1,9 @@
 use std::{sync::Arc, time::Duration};
 
-use pingora_core::server::{configuration::Opt, Server};
+use pingora_core::{
+    apps::HttpServerOptions,
+    server::{configuration::Opt, Server},
+};
 use tracing::{error, info};
 
 use httpgate::{
@@ -40,6 +43,12 @@ fn main() {
     // Create and configure proxy service
     let proxy = DevboxProxy::new(Arc::clone(&registry));
     let mut proxy_service = pingora_proxy::http_proxy_service(&server.configuration, proxy);
+    // Enable h2c (HTTP/2 over cleartext) to support gRPC
+    if let Some(app) = proxy_service.app_logic_mut() {
+        let mut opts = HttpServerOptions::default();
+        opts.h2c = true;
+        app.server_options = Some(opts);
+    }
     proxy_service.add_tcp(&config.listen_addr.to_string());
 
     server.add_service(proxy_service);

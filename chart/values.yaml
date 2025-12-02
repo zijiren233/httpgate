@@ -24,8 +24,8 @@ service:
 ingress:
   enabled: false
   ingressClassName: nginx
-  annotations:
-    nginx.ingress.kubernetes.io/backend-protocol: "HTTP"
+  annotations: {}
+    # Add custom annotations here (backend-protocol is set automatically)
   hosts:
     - host: "*.devbox.example.com"
       paths:
